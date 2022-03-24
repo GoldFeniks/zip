@@ -9,7 +9,7 @@
 
 namespace feniks {
 
-    namespace __impl {
+    namespace _impl {
 
 #define HAS_CONCEPT(name, concept, ...)                                                                        \
         template<typename T, __VA_ARGS__>                                                                      \
@@ -61,6 +61,11 @@ namespace feniks {
                 return gather<N, M - 1>::get(getter, tuple, std::forward<Values>(values)..., getter(std::get<N - M>(tuple)));
             }
 
+            template<typename Getter, typename Tuple, typename T, typename... Values>
+            static void get(Getter&& getter, Tuple&& tuple, T* location, Values&&... values) {
+                gather<N, M - 1>::get(getter, tuple, location, std::forward<Values>(values)..., getter(std::get<N - M>(tuple)));
+            }
+
         };
 
         template<size_t N>
@@ -71,6 +76,11 @@ namespace feniks {
             template<typename Getter, typename Tuple, typename... Values>
             static auto get(Getter&& getter, Tuple&& tuple, Values&&... values) {
                 return std::tuple<Values...>(values...);
+            }
+
+            template<typename Getter, typename Tuple, typename T, typename... Values>
+            static void get(Getter&& getter, Tuple&& tuple, T* location, Values&&... values) {
+                new (location) std::tuple<Values...>(values...);
             }
 
         };
@@ -86,10 +96,11 @@ namespace feniks {
             using pointer = value_type*;
             using reference = value_type&;
 
-            subscript_iterator(T& container, const ptrdiff_t& index) : _container(container), _index(index) {}
+            subscript_iterator() = default;
+            subscript_iterator(T* container, const ptrdiff_t& index) : _index(index), _container(container) {}
 
             bool operator==(const subscript_iterator& other) const {
-                return &_container == &other._container && _index == other._index;
+                return _container == other._container && _index == other._index;
             }
 
             bool operator!=(const subscript_iterator& other) const {
@@ -97,11 +108,11 @@ namespace feniks {
             }
 
             auto& operator*() {
-                return _container[_index];
+                return *_container[_index];
             }
 
             const auto& operator*() const {
-                return _container[_index];
+                return *_container[_index];
             }
 
             auto& operator->() {
@@ -153,11 +164,11 @@ namespace feniks {
             }
 
             auto& operator[](const size_t& n) {
-                return _container[_index + n];
+                return *_container[_index + n];
             }
 
             const auto& operator[](const size_t& n) const {
-                return _container[_index + n];
+                return *_container[_index + n];
             }
 
             bool operator<(const subscript_iterator& other) const {
@@ -178,8 +189,8 @@ namespace feniks {
 
         private:
 
-            T& _container;
-            ptrdiff_t _index;
+            ptrdiff_t _index{};
+            T* _container = nullptr;
 
             friend subscript_iterator operator+(const ptrdiff_t& n, const subscript_iterator& iterator) {
                 return subscript_iterator(iterator._container, n + iterator._index);
@@ -188,6 +199,7 @@ namespace feniks {
         };
 
         template<typename... V>
+        requires (std::is_reference_v<decltype(*std::declval<V>())> && ...)
         class zip_iterator {
 
         public:
@@ -196,9 +208,10 @@ namespace feniks {
             using value_type = std::tuple<decltype(*std::declval<const V>())...>;
             using difference_type = ptrdiff_t;
             using pointer = value_type*;
-            using reference = value_type;
+            using reference = value_type&;
 
-            zip_iterator(std::tuple<V...>&& iterators) : _iterators(std::move(iterators)) {}
+            zip_iterator() = default;
+            explicit zip_iterator(std::tuple<V...>&& iterators) : _iterators(std::move(iterators)) {}
 
             bool operator==(const zip_iterator& other) const {
                 return other._iterators == _iterators;
@@ -208,12 +221,14 @@ namespace feniks {
                 return !(*this == other);
             }
 
-            auto operator*() {
-                return gather<N>::get([](const auto& it) -> decltype(*it) { return *it; }, _iterators);
+            auto& operator*() {
+                gather<N>::get([](const auto& it) -> decltype(*it) { return *it; }, _iterators, _value);
+                return *reinterpret_cast<value_type*>(_value);
             }
 
-            auto operator*() const {
-                return gather<N>::get([](const auto& it) -> const decltype(*it) { return *it; }, _iterators);
+            auto& operator*() const {
+                gather<N>::get([](const auto& it) -> decltype(*it) { return *it; }, _iterators, _value);
+                return *reinterpret_cast<value_type*>(_value);
             }
 
             auto operator->() {
@@ -272,13 +287,15 @@ namespace feniks {
             }
 
             template<typename C = std::tuple<V...>, typename = std::enable_if_t<(is_subscriptable_v<V, size_t> && ...) && std::is_same_v<C, std::tuple<V...>>>>
-            auto operator[](const size_t& n) {
-                return gather<N>::get([&n](auto& it) -> decltype(it[0])& { return it[n]; }, _iterators);
+            auto& operator[](const size_t& n) {
+                gather<N>::get([&n](auto& it) -> decltype(it[0])& { return it[n]; }, _iterators, _value);
+                return *reinterpret_cast<value_type*>(_value);
             }
 
             template<typename C = std::tuple<V...>, typename = std::enable_if_t<(is_subscriptable_v<V, size_t> && ...) && std::is_same_v<C, std::tuple<V...>>>>
-            auto operator[](const size_t& n) const {
-                return gather<N>::get([&n](const auto& it) -> const decltype(it[0])& { return it[n]; }, _iterators);
+            auto& operator[](const size_t& n) const {
+                gather<N>::get([&n](const auto& it) -> const decltype(it[0])& { return it[n]; }, _iterators, _value);
+                return *reinterpret_cast<value_type*>(_value);
             }
 
             template<typename C = std::tuple<V...>, typename = std::enable_if_t<(can_compare_less_v<V, V> && ...) && std::is_same_v<C, std::tuple<V...>>>>
@@ -305,7 +322,8 @@ namespace feniks {
 
             static constexpr size_t N = sizeof...(V);
 
-            std::tuple<V...> _iterators;
+            std::tuple<V...> _iterators{};
+            char _value[sizeof(value_type)];
 
             template<typename C = std::tuple<V...>, typename = std::enable_if_t<(can_add_v<ptrdiff_t, V> && ...) && std::is_same_v<C, std::tuple<V...>>>>
             friend zip_iterator operator+(const ptrdiff_t& n, const zip_iterator<V...>& iterator) {
@@ -431,7 +449,7 @@ namespace feniks {
                             if constexpr (has_begin_v<type>)
                                 return container.begin();
                             else if constexpr (is_subscriptable_v<type, size_t>)
-                                return subscript_iterator(container, 0);
+                                return subscript_iterator(&container, 0);
                         },
                         _containers
                     )
@@ -448,7 +466,7 @@ namespace feniks {
                             if constexpr (has_begin_v<type>)
                                 return container.begin();
                             else if constexpr (is_subscriptable_v<type, size_t>)
-                                return subscript_iterator(container, 0);
+                                return subscript_iterator(&container, 0);
                         },
                         _containers
                     )
@@ -472,7 +490,7 @@ namespace feniks {
                                     return container.end();
                             }
                             else if constexpr (is_subscriptable_v<type, size_t> && has_size_v<type>)
-                                return std::next(subscript_iterator(container, 0), this->size());
+                                return std::next(subscript_iterator(&container, 0), this->size());
                         },
                         _containers
                     )
@@ -494,7 +512,7 @@ namespace feniks {
                                     return container.end();
                             }
                             else if constexpr (is_subscriptable_v<type, size_t> && has_size_v<type>)
-                                return std::next(subscript_iterator(container, 0), this->size());
+                                return std::next(subscript_iterator(&container, 0), this->size());
                         },
                         _containers
                     )
@@ -517,7 +535,7 @@ namespace feniks {
 
     template<typename... T>
     auto zip(T&&... values) {
-        return __impl::zip<T...>(std::forward<T>(values)...);
+        return _impl::zip<T...>(std::forward<T>(values)...);
     }
 
     template<typename T>
